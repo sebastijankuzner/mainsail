@@ -34,13 +34,13 @@ export class PeerDisposer implements Contracts.P2P.PeerDisposer {
 			this.#isNesError(error) &&
 			(error.type === errorTypes.WS || error.type === errorTypes.DISCONNECT || error.type === errorTypes.TIMEOUT)
 		) {
-			this.logger.debug(`Disposing peer ${ip}, because: ${error.message}`);
+			this.logger.warning(`Disposing peer ${ip}, because: ${error.message}`);
 			this.disposePeer(ip);
 
 			return;
 		}
 
-		this.logger.debug(`Banning peer ${ip}, because: ${error.message}`);
+		this.logger.warning(`Banning peer ${ip}, because: ${error.message}`);
 
 		const timeout = this.configuration.getRequired<number>("peerBanTime");
 		if (timeout > 0) {
