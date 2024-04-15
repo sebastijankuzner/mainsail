@@ -4,6 +4,7 @@ import { BigNumber } from "@mainsail/utils";
 
 import { sealBlock } from "./block.js";
 import { IDFactory } from "./id.factory.js";
+import { performance } from "perf_hooks";
 
 @injectable()
 export class BlockFactory implements Contracts.Crypto.BlockFactory {
@@ -18,6 +19,9 @@ export class BlockFactory implements Contracts.Crypto.BlockFactory {
 
 	@inject(Identifiers.Cryptography.Validator)
 	private readonly validator!: Contracts.Crypto.Validator;
+
+	@inject(Identifiers.Services.Log.Service)
+	protected readonly logger!: Contracts.Kernel.Logger;
 
 	public async make(data: Utils.Mutable<Contracts.Crypto.BlockDataSerializable>): Promise<Contracts.Crypto.Block> {
 		const block = data as Utils.Mutable<Contracts.Crypto.BlockData>;
@@ -64,9 +68,15 @@ export class BlockFactory implements Contracts.Crypto.BlockFactory {
 	}
 
 	async #fromSerialized(serialized: Buffer): Promise<Contracts.Crypto.Block> {
+		const t1 = performance.now();
 		const deserialized = await this.deserializer.deserializeWithTransactions(serialized);
 
+		const t2 = performance.now();
+
 		const validated: Contracts.Crypto.BlockData | undefined = await this.#applySchema(deserialized.data);
+
+		this.logger.info(`!!!Deserializing block took ${t2 - t1}ms
+!!!Applying schema took ${performance.now() - t2}ms`);
 
 		if (validated) {
 			deserialized.data = validated;

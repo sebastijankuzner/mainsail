@@ -6,6 +6,7 @@ import { ByteBuffer } from "@mainsail/utils";
 import { Precommit } from "./precommit.js";
 import { Prevote } from "./prevote.js";
 import { Proposal } from "./proposal.js";
+import { performance } from "perf_hooks";
 
 @injectable()
 export class MessageFactory implements Contracts.Crypto.MessageFactory {
@@ -24,6 +25,9 @@ export class MessageFactory implements Contracts.Crypto.MessageFactory {
 	@inject(Identifiers.CryptoWorker.WorkerPool)
 	private readonly workerPool!: IpcWorker.WorkerPool;
 
+	@inject(Identifiers.Services.Log.Service)
+	protected readonly logger!: Contracts.Kernel.Logger;
+
 	public async makeProposal(
 		data: Contracts.Crypto.MakeProposalData,
 		keyPair: Contracts.Crypto.KeyPair,
@@ -37,16 +41,35 @@ export class MessageFactory implements Contracts.Crypto.MessageFactory {
 	}
 
 	public async makeProposalFromBytes(bytes: Buffer): Promise<Contracts.Crypto.Proposal> {
+		const t1 = performance.now();
+
 		const data = await this.deserializer.deserializeProposal(bytes);
-		return this.makeProposalFromData(data, bytes);
+
+		const t2 = performance.now();
+
+		const res = await this.makeProposalFromData(data, bytes);
+
+		this.logger.info(`!!!Processing proposal took ${performance.now() - t1}ms
+!!!Deserializing proposal took ${t2 - t1}ms
+!!!Making proposal from data took ${performance.now() - t2}ms
+		`);
+
+		return res;
 	}
 
 	public async makeProposalFromData(
 		data: Contracts.Crypto.ProposalData,
 		serialized?: Buffer,
 	): Promise<Contracts.Crypto.Proposal> {
+		const t1 = performance.now();
 		this.#applySchema("proposal", data);
+
+		const t2 = performance.now();
+
 		const block = await this.#makeProposedBlockFromBytes(Buffer.from(data.block.serialized, "hex"));
+
+		this.logger.info(`!!!Applying schema took ${t2 - t1}ms
+!!!Making proposed block from bytes took ${performance.now() - t2}ms`);
 
 		if (!serialized) {
 			serialized = await this.serializer.serializeProposal(data, { includeSignature: true });

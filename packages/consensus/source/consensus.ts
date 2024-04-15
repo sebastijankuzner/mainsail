@@ -1,6 +1,7 @@
 import { inject, injectable } from "@mainsail/container";
 import { Contracts, Identifiers } from "@mainsail/contracts";
 import { Enums, Utils } from "@mainsail/kernel";
+import { performance } from "perf_hooks";
 
 @injectable()
 export class Consensus implements Contracts.Consensus.ConsensusService {
@@ -132,7 +133,12 @@ export class Consensus implements Contracts.Consensus.ConsensusService {
 			}
 
 			if (!roundState.hasProcessorResult() && roundState.hasProposal()) {
+				const t1 = performance.now();
 				const result = await this.processor.process(roundState);
+				const t2 = performance.now();
+
+				this.logger.info(`Block processing time: ${t2 - t1}ms`);
+
 				roundState.setProcessorResult(result);
 			}
 
@@ -426,7 +432,7 @@ export class Consensus implements Contracts.Consensus.ConsensusService {
 
 		const proposal = await this.#makeProposal(roundState, registeredProposer);
 
-		void this.proposalProcessor.process(proposal);
+		void this.proposalProcessor.process(proposal, true);
 	}
 
 	async #makeProposal(

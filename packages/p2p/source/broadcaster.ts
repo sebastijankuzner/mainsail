@@ -51,7 +51,9 @@ export class Broadcaster implements Contracts.P2P.Broadcaster {
 	async broadcastProposal(proposal: Contracts.Crypto.Proposal): Promise<void> {
 		this.state.resetLastMessageTime();
 
-		const promises = this.#getPeersForBroadcast().map((peer) =>
+		this.logger.info(`!!!Broadcasting proposal: ${proposal.block.block.data.id}`);
+
+		const promises = this.#getPeersForBroadcast2().map((peer) =>
 			this.communicator.postProposal(peer, proposal.serialized),
 		);
 
@@ -80,6 +82,13 @@ export class Broadcaster implements Contracts.P2P.Broadcaster {
 
 	#getPeersForBroadcast(): Contracts.P2P.Peer[] {
 		const maxPeersBroadcast: number = this.configuration.getRequired<number>("maxPeersBroadcast");
+		const peers: Contracts.P2P.Peer[] = Utils.take(Utils.shuffle(this.repository.getPeers()), maxPeersBroadcast);
+
+		return peers;
+	}
+
+	#getPeersForBroadcast2(): Contracts.P2P.Peer[] {
+		const maxPeersBroadcast: number = 20;
 		const peers: Contracts.P2P.Peer[] = Utils.take(Utils.shuffle(this.repository.getPeers()), maxPeersBroadcast);
 
 		return peers;
