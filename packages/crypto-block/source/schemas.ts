@@ -17,7 +17,7 @@ export const schemas: Record<"block" | "blockId" | "blockHeader", AnySchemaObjec
 	blockHeader: {
 		$id: "blockHeader",
 		properties: {
-			generatorPublicKey: { $ref: "publicKey" },
+			generatorPublicKey: { $ref: "address" },
 			height: { minimum: 0, type: "integer" },
 			id: { $ref: "blockId" },
 			numberOfTransactions: { minimum: 0, type: "integer" },
@@ -25,9 +25,11 @@ export const schemas: Record<"block" | "blockId" | "blockHeader", AnySchemaObjec
 			payloadLength: { minimum: 0, type: "integer" },
 			previousBlock: { $ref: "blockId" },
 			reward: { bignumber: { minimum: 0 } },
+			stateHash: { $ref: "hex" },
 			timestamp: { maximum: 2 ** 48 - 1, minimum: 0, type: "integer" },
 			totalAmount: { bignumber: { minimum: 0 } },
 			totalFee: { bignumber: { minimum: 0 } },
+			totalGasUsed: { minimum: 0, type: "integer" },
 			version: { enum: [1] },
 		},
 		required: [
@@ -35,6 +37,8 @@ export const schemas: Record<"block" | "blockId" | "blockHeader", AnySchemaObjec
 			"timestamp",
 			"previousBlock",
 			"height",
+			"stateHash",
+			"totalGasUsed",
 			"totalAmount",
 			"totalFee",
 			"reward",

@@ -1,12 +1,11 @@
 import { inject, injectable } from "@mainsail/container";
 import { Contracts, Identifiers } from "@mainsail/contracts";
-import { TransferBuilder } from "@mainsail/crypto-transaction-transfer";
-import { UsernameRegistrationBuilder } from "@mainsail/crypto-transaction-username-registration";
-import { ValidatorRegistrationBuilder } from "@mainsail/crypto-transaction-validator-registration";
-import { VoteBuilder } from "@mainsail/crypto-transaction-vote";
+import { EvmCallBuilder } from "@mainsail/crypto-transaction-evm-call";
+import { ContractAbis } from "@mainsail/evm-consensus";
 import { Utils } from "@mainsail/kernel";
 import { BigNumber } from "@mainsail/utils";
 import dayjs from "dayjs";
+import { ethers } from "ethers";
 
 import { Wallet } from "../contracts.js";
 import { Generator } from "./generator.js";
@@ -22,13 +21,14 @@ export class GenesisBlockGenerator extends Generator {
 	@inject(Identifiers.Cryptography.Transaction.Verifier)
 	private readonly transactionVerifier!: Contracts.Crypto.TransactionVerifier;
 
+	@inject(Identifiers.Evm.Gas.Limits)
+	private readonly gasLimits!: Contracts.Evm.GasLimits;
+
 	async generate(
 		genesisMnemonic: string,
 		validatorsMnemonics: string[],
 		options: Contracts.NetworkGenerator.GenesisBlockOptions,
 	): Promise<Contracts.Crypto.CommitData> {
-		const premineWallet = await this.createWallet();
-
 		const genesisWallet = await this.createWallet(genesisMnemonic);
 
 		const validators = await Promise.all(
@@ -40,7 +40,7 @@ export class GenesisBlockGenerator extends Generator {
 		if (options.distribute) {
 			transactions = transactions.concat(
 				...(await this.#createTransferTransactions(
-					premineWallet,
+					genesisWallet,
 					validators,
 					options.premine,
 					options.pubKeyHash,
@@ -49,7 +49,7 @@ export class GenesisBlockGenerator extends Generator {
 		} else {
 			transactions = transactions.concat(
 				await this.#createTransferTransaction(
-					premineWallet,
+					genesisWallet,
 					genesisWallet,
 					options.premine,
 					options.pubKeyHash,
@@ -59,13 +59,13 @@ export class GenesisBlockGenerator extends Generator {
 
 		const validatorTransactions = [
 			...(await this.#buildValidatorTransactions(validators, options.pubKeyHash)),
-			...(await this.#buildUsernameTransactions(validators, options.pubKeyHash)),
+			// ...(await this.#buildUsernameTransactions(validators, options.pubKeyHash)),
 			...(await this.#buildVoteTransactions(validators, options.pubKeyHash)),
 		];
 
 		transactions = [...transactions, ...validatorTransactions];
 
-		const genesis = await this.#createGenesisCommit(premineWallet.keys, transactions, options);
+		const genesis = await this.#createGenesisCommit(genesisWallet.keys, transactions, options);
 
 		return {
 			block: genesis.block.data,
@@ -83,11 +83,13 @@ export class GenesisBlockGenerator extends Generator {
 	): Promise<Contracts.Crypto.Transaction> {
 		return await (
 			await this.app
-				.resolve(TransferBuilder)
+				.resolve(EvmCallBuilder)
 				.network(pubKeyHash)
-				.nonce(nonce.toFixed(0))
 				.recipientId(recipient.address)
+				.nonce(nonce.toFixed(0))
 				.amount(amount)
+				.payload("")
+				.gasLimit(21_000)
 				.sign(sender.passphrase)
 		).build();
 	}
@@ -112,30 +114,24 @@ export class GenesisBlockGenerator extends Generator {
 	async #buildValidatorTransactions(senders: Wallet[], pubKeyHash: number): Promise<Contracts.Crypto.Transaction[]> {
 		const result: Contracts.Crypto.Transaction[] = [];
 
+		const iface = new ethers.Interface(ContractAbis.CONSENSUS.abi.abi);
+
+		// TODO: move to constant (can be calculated based on deployer address + nonce)
+		const consensusContractAddress = "0x522B3294E6d06aA25Ad0f1B8891242E335D3B459";
+
 		for (const [index, sender] of senders.entries()) {
+			const data = iface
+				.encodeFunctionData("registerValidator", [Buffer.from(sender.consensusKeys.publicKey, "hex")])
+				.slice(2);
+
 			result[index] = await (
 				await this.app
-					.resolve(ValidatorRegistrationBuilder)
+					.resolve(EvmCallBuilder)
 					.network(pubKeyHash)
+					.recipientId(consensusContractAddress)
 					.nonce("1") // validator registration tx is always the first one from sender
-					.publicKeyAsset(sender.consensusKeys.publicKey)
-					.sign(sender.passphrase)
-			).build();
-		}
-
-		return result;
-	}
-
-	async #buildUsernameTransactions(senders: Wallet[], pubKeyHash: number): Promise<Contracts.Crypto.Transaction[]> {
-		const result: Contracts.Crypto.Transaction[] = [];
-
-		for (const [index, sender] of senders.entries()) {
-			result[index] = await (
-				await this.app
-					.resolve(UsernameRegistrationBuilder)
-					.network(pubKeyHash)
-					.nonce("2") // username registration tx is always the 2nd one from sender
-					.usernameAsset(`genesis_${index + 1}`)
+					.payload(data)
+					.gasLimit(500_000)
 					.sign(sender.passphrase)
 			).build();
 		}
@@ -146,13 +142,22 @@ export class GenesisBlockGenerator extends Generator {
 	async #buildVoteTransactions(senders: Wallet[], pubKeyHash: number): Promise<Contracts.Crypto.Transaction[]> {
 		const result: Contracts.Crypto.Transaction[] = [];
 
+		const iface = new ethers.Interface(ContractAbis.CONSENSUS.abi.abi);
+
+		// TODO: move to constant (can be calculated based on deployer address + nonce)
+		const consensusContractAddress = "0x522B3294E6d06aA25Ad0f1B8891242E335D3B459";
+
 		for (const [index, sender] of senders.entries()) {
+			const data = iface.encodeFunctionData("vote", [sender.address]).slice(2);
+
 			result[index] = await (
 				await this.app
-					.resolve(VoteBuilder)
+					.resolve(EvmCallBuilder)
 					.network(pubKeyHash)
-					.nonce("3") // vote transaction is always the 3rd tx from sender (1st one is validator registration)
-					.votesAsset([sender.keys.publicKey])
+					.recipientId(consensusContractAddress)
+					.nonce("2") // vote transaction is always the 3rd tx from sender (1st one is validator registration)
+					.payload(data)
+					.gasLimit(200_000)
 					.sign(sender.passphrase)
 			).build();
 		}
@@ -189,23 +194,27 @@ export class GenesisBlockGenerator extends Generator {
 		transactions: Contracts.Crypto.Transaction[],
 		options: Contracts.NetworkGenerator.GenesisBlockOptions,
 	): Promise<{ block: Contracts.Crypto.Block; transactions: Contracts.Crypto.TransactionData[] }> {
-		const totals: { amount: BigNumber; fee: BigNumber } = {
+		const totals: { amount: BigNumber; fee: BigNumber; gasUsed: number } = {
 			amount: BigNumber.ZERO,
 			fee: BigNumber.ZERO,
+			gasUsed: 0,
 		};
 
 		const payloadBuffers: Buffer[] = [];
 
 		// The initial payload length takes the overhead for each serialized transaction into account
-		// which is a uint32 per transaction to store the individual length.
-		let payloadLength = transactions.length * 4;
+		// which is a uint16 per transaction to store the individual length.
+		let payloadLength = transactions.length * 2;
 
 		const transactionData: Contracts.Crypto.TransactionData[] = [];
-		for (const { serialized, data } of transactions) {
+		for (const transaction of transactions) {
+			const { serialized, data } = transaction;
+
 			Utils.assert.defined<string>(data.id);
 
 			totals.amount = totals.amount.plus(data.amount);
 			totals.fee = totals.fee.plus(data.fee);
+			totals.gasUsed += this.gasLimits.of(transaction);
 
 			payloadBuffers.push(Buffer.from(data.id, "hex"));
 			transactionData.push(data);
@@ -215,7 +224,13 @@ export class GenesisBlockGenerator extends Generator {
 		return {
 			block: await this.app.get<Contracts.Crypto.BlockFactory>(Identifiers.Cryptography.Block.Factory).make(
 				{
-					generatorPublicKey: keys.publicKey,
+					generatorPublicKey: await this.app
+					.getTagged<Contracts.Crypto.AddressFactory>(
+						Identifiers.Cryptography.Identity.Address.Factory,
+						"type",
+						"wallet",
+					)
+					.fromPublicKey(keys.publicKey),
 					height: 0,
 					numberOfTransactions: transactions.length,
 					payloadHash: (
@@ -227,9 +242,11 @@ export class GenesisBlockGenerator extends Generator {
 					previousBlock: "0000000000000000000000000000000000000000000000000000000000000000",
 					reward: BigNumber.ZERO,
 					round: 0,
+					stateHash: "0000000000000000000000000000000000000000000000000000000000000000",
 					timestamp: dayjs(options.epoch).valueOf(),
 					totalAmount: totals.amount,
 					totalFee: totals.fee,
+					totalGasUsed: totals.gasUsed,
 					transactions: transactionData,
 					version: 1,
 				},
@@ -250,7 +267,7 @@ export class GenesisBlockGenerator extends Generator {
 
 		const verified = await this.blockVerifier.verify(genesis.block);
 		if (!verified.verified) {
-			throw new Error("failed to generate genesis block");
+			throw new Error(`failed to generate genesis block: ${JSON.stringify(verified.errors)}`);
 		}
 	}
 }

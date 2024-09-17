@@ -28,7 +28,7 @@ export class RoundState implements Contracts.Consensus.RoundState {
 	#height = 0;
 	#round = 0;
 	#proposal?: Contracts.Crypto.Proposal;
-	#processorResult?: boolean;
+	#processorResult?: Contracts.Processor.BlockProcessorResult;
 	#prevotes = new Map<number, Contracts.Crypto.Prevote>();
 	#prevotesCount = new Map<string | undefined, number>();
 	#precommits = new Map<number, Contracts.Crypto.Precommit>();
@@ -148,7 +148,7 @@ export class RoundState implements Contracts.Consensus.RoundState {
 		return this.#commit;
 	}
 
-	public setProcessorResult(processorResult: boolean): void {
+	public setProcessorResult(processorResult: Contracts.Processor.BlockProcessorResult): void {
 		this.#processorResult = processorResult;
 	}
 
@@ -156,7 +156,7 @@ export class RoundState implements Contracts.Consensus.RoundState {
 		return this.#processorResult !== undefined;
 	}
 
-	public getProcessorResult(): boolean {
+	public getProcessorResult(): Contracts.Processor.BlockProcessorResult {
 		if (this.#processorResult === undefined) {
 			throw new Error("Processor result is undefined.");
 		}
@@ -262,7 +262,7 @@ export class RoundState implements Contracts.Consensus.RoundState {
 		for (const key of this.#prevotesCount.keys()) {
 			const voters = [...this.#prevotes.values()]
 				.filter((prevote) => prevote.blockId === key)
-				.map((prevote) => this.validatorSet.getValidator(prevote.validatorIndex).getWalletPublicKey());
+				.map((prevote) => this.validatorSet.getValidator(prevote.validatorIndex).getWallet().getAddress());
 
 			this.logger.debug(`Block ${key ?? "null"} prevoted by: ${voters.join(", ")}`);
 		}
@@ -272,7 +272,7 @@ export class RoundState implements Contracts.Consensus.RoundState {
 		for (const key of this.#precommitsCount.keys()) {
 			const voters = [...this.#precommits.values()]
 				.filter((precommit) => precommit.blockId === key)
-				.map((precommit) => this.validatorSet.getValidator(precommit.validatorIndex).getWalletPublicKey());
+				.map((precommit) => this.validatorSet.getValidator(precommit.validatorIndex).getWallet().getAddress());
 
 			this.logger.debug(`Block ${key ?? "null"} precommitted by: ${voters.join(", ")}`);
 		}

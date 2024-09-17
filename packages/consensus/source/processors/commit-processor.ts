@@ -27,7 +27,7 @@ export class CommitProcessor extends AbstractProcessor implements Contracts.Cons
 	async process(commit: Contracts.Crypto.Commit): Promise<Contracts.Consensus.ProcessorResult> {
 		let promise: Promise<void> | undefined;
 
-		const result = await this.commitLock.runNonExclusive(async (): Promise<Contracts.Consensus.ProcessorResult> => {
+		const result = await this.commitLock.runExclusive(async (): Promise<Contracts.Consensus.ProcessorResult> => {
 			if (!this.#hasValidHeight(commit)) {
 				return Contracts.Consensus.ProcessorResult.Skipped;
 			}
@@ -36,7 +36,7 @@ export class CommitProcessor extends AbstractProcessor implements Contracts.Cons
 
 			const result = await this.processor.process(commitState);
 
-			if (result === false) {
+			if (!result.success) {
 				return Contracts.Consensus.ProcessorResult.Invalid;
 			}
 

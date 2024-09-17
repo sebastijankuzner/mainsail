@@ -1,5 +1,6 @@
 import { inject, injectable, tagged } from "@mainsail/container";
 import { Contracts, Identifiers } from "@mainsail/contracts";
+import { Identifiers as EvmConsensusIdentifiers } from "@mainsail/evm-consensus";
 import { Providers, Utils } from "@mainsail/kernel";
 import { BigNumber } from "@mainsail/utils";
 import { performance } from "perf_hooks";
@@ -9,6 +10,9 @@ export class Validator implements Contracts.Validator.Validator {
 	@inject(Identifiers.ServiceProvider.Configuration)
 	@tagged("plugin", "validator")
 	private readonly configuration!: Providers.PluginConfiguration;
+
+	@inject(EvmConsensusIdentifiers.Internal.GenesisInfo)
+	private readonly genesisInfo!: Contracts.Evm.GenesisInfo;
 
 	@inject(Identifiers.Cryptography.Block.Factory)
 	private readonly blockFactory!: Contracts.Crypto.BlockFactory;
@@ -53,12 +57,18 @@ export class Validator implements Contracts.Validator.Validator {
 	}
 
 	public async prepareBlock(
-		generatorPublicKey: string,
+		generatorAddress: string,
 		round: number,
 		timestamp: number,
 	): Promise<Contracts.Crypto.Block> {
-		const transactions = await this.#getTransactionsForForging();
-		return this.#makeBlock(round, generatorPublicKey, transactions, timestamp);
+		const previousBlock = this.stateService.getStore().getLastBlock();
+		const height = previousBlock.header.height + 1;
+
+		const { stateHash, transactions } = await this.#getTransactionsForForging(generatorAddress, timestamp, {
+			height: BigInt(height),
+			round: BigInt(round),
+		});
+		return this.#makeBlock(round, generatorAddress, stateHash, transactions, timestamp);
 	}
 
 	public async propose(
@@ -116,18 +126,28 @@ export class Validator implements Contracts.Validator.Validator {
 		);
 	}
 
-	async #getTransactionsForForging(): Promise<Contracts.Crypto.Transaction[]> {
+	async #getTransactionsForForging(
+		generatorAddress: string,
+		timestamp: number,
+		commitKey: Contracts.Evm.CommitKey,
+	): Promise<{ stateHash: string; transactions: Contracts.Crypto.Transaction[] }> {
 		const transactionBytes = await this.txPoolWorker.getTransactionBytes();
 
 		const validator = this.createTransactionValidator();
+		await validator.getEvm().initializeGenesis(this.genesisInfo);
+		await validator.getEvm().prepareNextCommit({ commitKey });
+
 		const candidateTransactions: Contracts.Crypto.Transaction[] = [];
 		const failedTransactions: Contracts.Crypto.Transaction[] = [];
+
+		const previousBlock = this.stateService.getStore().getLastBlock();
+		const milestone = this.cryptoConfiguration.getMilestone();
+		let gasLeft = milestone.block.maxGasLimit;
 
 		// txCollatorFactor% of the time for block preparation, the rest is for  block and proposal serialization and signing
 		const timeLimit =
 			performance.now() +
-			this.cryptoConfiguration.getMilestone().timeouts.blockPrepareTime *
-				this.configuration.getRequired<number>("txCollatorFactor");
+			milestone.timeouts.blockPrepareTime * this.configuration.getRequired<number>("txCollatorFactor");
 
 		for (const bytes of transactionBytes) {
 			if (performance.now() > timeLimit) {
@@ -135,13 +155,27 @@ export class Validator implements Contracts.Validator.Validator {
 			}
 
 			const transaction = await this.transactionFactory.fromBytes(bytes);
+			transaction.data.sequence = candidateTransactions.length;
 
 			if (failedTransactions.some((t) => t.data.senderPublicKey === transaction.data.senderPublicKey)) {
 				continue;
 			}
 
 			try {
-				await validator.validate(transaction);
+				const gasLimit = transaction.data.asset?.evmCall?.gasLimit || 0;
+
+				if (gasLeft - gasLimit < 0) {
+					break;
+				}
+
+				const result = await validator.validate(
+					{ commitKey, gasLimit: milestone.block.maxGasLimit, generatorAddress, timestamp },
+					transaction,
+				);
+
+				gasLeft -= result.gasUsed;
+
+				transaction.data.gasUsed = result.gasUsed;
 				candidateTransactions.push(transaction);
 			} catch (error) {
 				this.logger.warning(`${transaction.id} failed to collate: ${error.message}`);
@@ -151,53 +185,85 @@ export class Validator implements Contracts.Validator.Validator {
 
 		this.txPoolWorker.setFailedTransactions(failedTransactions);
 
-		return candidateTransactions;
+		await validator.getEvm().updateRewardsAndVotes({
+			commitKey,
+			timestamp: BigInt(timestamp),
+			validatorAddress: generatorAddress,
+			blockReward: Utils.BigNumber.make(milestone.reward).toBigInt(),
+			specId: milestone.evmSpec,
+		});
+
+		if(Utils.roundCalculator.isNewRound(previousBlock.header.height + 2, this.cryptoConfiguration)) {
+			const { activeValidators } = this.cryptoConfiguration.getMilestone(previousBlock.header.height + 2);
+
+			await validator.getEvm().calculateTopValidators({
+				activeValidators: Utils.BigNumber.make(activeValidators).toBigInt(),
+				commitKey,
+				specId: milestone.evmSpec,
+				timestamp: BigInt(timestamp),
+				validatorAddress: generatorAddress,
+			});
+		}
+
+		return {
+			stateHash: await validator.getEvm().stateHash(commitKey, previousBlock.header.stateHash),
+			transactions: candidateTransactions,
+		};
 	}
 
 	async #makeBlock(
 		round: number,
 		generatorPublicKey: string,
+		stateHash: string,
 		transactions: Contracts.Crypto.Transaction[],
 		timestamp: number,
 	): Promise<Contracts.Crypto.Block> {
-		const totals: { amount: BigNumber; fee: BigNumber } = {
+		const totals: { amount: BigNumber; fee: BigNumber; gasUsed: number } = {
 			amount: BigNumber.ZERO,
 			fee: BigNumber.ZERO,
+			gasUsed: 0,
 		};
+
+		const previousBlock = this.stateService.getStore().getLastBlock();
+		const height = previousBlock.header.height + 1;
+		const milestone = this.cryptoConfiguration.getMilestone(height);
 
 		const payloadBuffers: Buffer[] = [];
 		const transactionData: Contracts.Crypto.TransactionData[] = [];
 
-		// The initial payload length takes the overhead for each serialized transaction into account
-		// which is a uint32 per transaction to store the individual length.
-		let payloadLength = transactions.length * 4;
-		for (const { data, serialized } of transactions) {
+		// The payload length needs to account for the overhead of each serialized transaction
+		// which is a uint16 per transaction to store the individual length.
+		let payloadLength = transactions.length * 2;
+
+		for (const transaction of transactions) {
+			const { data, serialized } = transaction;
 			Utils.assert.defined<string>(data.id);
+			Utils.assert.defined<number>(data.gasUsed);
 
 			totals.amount = totals.amount.plus(data.amount);
 			totals.fee = totals.fee.plus(data.fee);
+			totals.gasUsed += data.gasUsed;
 
 			payloadBuffers.push(Buffer.from(data.id, "hex"));
 			transactionData.push(data);
 			payloadLength += serialized.length;
 		}
 
-		const previousBlock = this.stateService.getStore().getLastBlock();
-		const height = previousBlock.data.height + 1;
-
 		return this.blockFactory.make(
 			{
 				generatorPublicKey,
 				height,
-				numberOfTransactions: transactions.length,
+				numberOfTransactions: transactionData.length,
 				payloadHash: (await this.hashFactory.sha256(payloadBuffers)).toString("hex"),
 				payloadLength,
-				previousBlock: previousBlock.data.id,
-				reward: BigNumber.make(this.cryptoConfiguration.getMilestone(height).reward),
+				previousBlock: previousBlock.header.id,
+				reward: BigNumber.make(milestone.reward),
 				round,
+				stateHash,
 				timestamp,
 				totalAmount: totals.amount,
 				totalFee: totals.fee,
+				totalGasUsed: totals.gasUsed,
 				transactions: transactionData,
 				version: 1,
 			},

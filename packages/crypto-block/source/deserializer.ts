@@ -68,17 +68,23 @@ export class Deserializer implements Contracts.Crypto.BlockDeserializer {
 				previousBlock: {
 					type: "hash",
 				},
+				stateHash: {
+					type: "hash",
+				},
 				numberOfTransactions: {
 					type: "uint16",
 				},
+				totalGasUsed: {
+					type: "uint32",
+				},
 				totalAmount: {
-					type: "bigint",
+					type: "uint256",
 				},
 				totalFee: {
-					type: "bigint",
+					type: "uint256",
 				},
 				reward: {
-					type: "bigint",
+					type: "uint256",
 				},
 				payloadLength: {
 					type: "uint32",
@@ -87,7 +93,7 @@ export class Deserializer implements Contracts.Crypto.BlockDeserializer {
 					type: "hash",
 				},
 				generatorPublicKey: {
-					type: "publicKey",
+					type: "address",
 				},
 			},
 		});
